@@ -3,4 +3,8 @@ dist
 .dev.vars
 .env
 .env.*
+*.pem
+*service-account*.json
+*credentials*.json
+*chave*.json
 .DS_Store
