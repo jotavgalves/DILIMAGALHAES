@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const PROJECT = 'dilimagalhaes';
 const [jsonPath, driveFileId] = process.argv.slice(2);
@@ -26,18 +28,23 @@ const secrets = {
   GOOGLE_DRIVE_FILE_ID: driveFileId,
 };
 
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const repoDir = path.resolve(scriptDir, '..');
+const wranglerCli = path.join(repoDir, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
+
 function putSecret(name, value) {
   return new Promise((resolve, reject) => {
     console.log(`Configurando ${name}...`);
     const child = spawn(
-      process.platform === 'win32' ? 'npx.cmd' : 'npx',
-      ['wrangler', 'pages', 'secret', 'put', name, '--project-name', PROJECT],
-      { stdio: ['pipe', 'inherit', 'inherit'] }
+      process.execPath,
+      [wranglerCli, 'pages', 'secret', 'put', name, '--project-name', PROJECT],
+      { cwd: repoDir, stdio: ['pipe', 'inherit', 'inherit'], windowsHide: true }
     );
-    child.stdin.write(String(value));
-    child.stdin.end();
-    child.on('exit', code => code === 0 ? resolve() : reject(new Error(`Falha ao configurar ${name}. Código ${code}`)));
+
     child.on('error', reject);
+    child.stdin.on('error', reject);
+    child.stdin.end(String(value) + '\n');
+    child.on('exit', code => code === 0 ? resolve() : reject(new Error(`Falha ao configurar ${name}. Código ${code}`)));
   });
 }
 
