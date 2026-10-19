@@ -1,0 +1,13 @@
+{
+  "name": "diligencias-magalhaes",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler pages dev .",
+    "deploy": "wrangler pages deploy . --project-name dilimaglhaes",
+    "cf:secrets": "node scripts/configure-cloudflare.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
