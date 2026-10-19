@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
-const PROJECT = 'dilimaglhaes';
+const PROJECT = 'dilimagalhaes';
 const [jsonPath, driveFileId] = process.argv.slice(2);
 
 if (!jsonPath || !driveFileId) {
@@ -46,5 +46,5 @@ for (const [name, value] of Object.entries(secrets)) {
 }
 
 console.log('\nSecrets configurados com sucesso.');
-console.log('Confira com: npx wrangler pages secret list --project-name dilimaglhaes');
+console.log('Confira com: npx wrangler pages secret list --project-name dilimagalhaes');
 console.log('Depois, um novo deploy pode ser feito com: npm run deploy');
