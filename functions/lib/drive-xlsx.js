@@ -140,8 +140,18 @@ function concatBytes(parts) {
   return out;
 }
 
-async function createTempSpreadsheet(env) {
-  const originalId = await resolveOriginalId(env);
+async function canUseOriginalWithSheetsApi(env, originalId) {
+  const response = await rawGoogleFetch(
+    env,
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(originalId)}?fields=spreadsheetId`,
+  );
+  if (response.ok) return true;
+  const detail = await response.text();
+  console.warn('Sheets API não aceitou XLSX diretamente:', response.status, detail.slice(0, 400));
+  return false;
+}
+
+async function createTempSpreadsheet(env, originalId) {
   const original = await googleFetch(
     env,
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(originalId)}?alt=media&supportsAllDrives=true`,
@@ -158,7 +168,7 @@ async function createTempSpreadsheet(env) {
     bytes,
     `\r\n--${boundary}--`,
   ]);
-  const created = await googleFetch(
+  const created = await rawGoogleFetch(
     env,
     'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,mimeType',
     {
@@ -167,9 +177,16 @@ async function createTempSpreadsheet(env) {
       body,
     },
   );
+  if (!created.ok) {
+    const detail = await created.text();
+    if (created.status === 403 && detail.includes('storageQuotaExceeded')) {
+      throw new Error('A conta de serviço conseguiu acessar o XLSX, mas o Google não permite criar a cópia temporária por falta de cota de armazenamento da própria conta de serviço. O sistema já tentou usar o XLSX diretamente pela Sheets API e esse arquivo não foi aceito como planilha nativa.');
+    }
+    throw new Error(`Google respondeu ${created.status}: ${detail.slice(0, 900)}`);
+  }
   const data = await created.json();
   if (!data.id) throw new Error('O Google não retornou o ID da cópia temporária da planilha.');
-  return { tempId: data.id, originalId };
+  return data.id;
 }
 
 async function exportBackToOriginal(env, tempId, originalId) {
@@ -203,7 +220,16 @@ export function configured(env) {
 }
 
 export async function withTempSpreadsheet(env, write, fn) {
-  const { tempId, originalId } = await createTempSpreadsheet(env);
+  const originalId = await resolveOriginalId(env);
+
+  // Primeiro tenta usar o arquivo Office diretamente. Em contas que suportam
+  // Office Editing via Sheets API isso elimina conversões e não consome cota.
+  if (await canUseOriginalWithSheetsApi(env, originalId)) {
+    return fn(originalId);
+  }
+
+  // Fallback para conversão temporária quando a Sheets API não aceita o XLSX.
+  const tempId = await createTempSpreadsheet(env, originalId);
   try {
     const result = await fn(tempId);
     if (write) await exportBackToOriginal(env, tempId, originalId);
