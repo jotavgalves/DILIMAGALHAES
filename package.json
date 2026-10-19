@@ -7,6 +7,10 @@
     "deploy": "wrangler pages deploy . --project-name dilimagalhaes",
     "cf:secrets": "node scripts/configure-cloudflare.mjs"
   },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "jose": "^6.1.0"
+  },
   "devDependencies": {
     "wrangler": "^4.0.0"
   }
