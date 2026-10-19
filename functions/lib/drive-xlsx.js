@@ -1,12 +1,28 @@
-import ExcelJS from 'exceljs';
-import { SignJWT, importPKCS8 } from 'jose';
-
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const GSHEET_MIME = 'application/vnd.google-apps.spreadsheet';
 let tokenCache = null;
 
-function clean(v) {
-  return v === null || v === undefined ? '' : String(v).trim();
+const clean = v => v === null || v === undefined ? '' : String(v).trim();
+
+function b64url(input) {
+  let bytes = input;
+  if (typeof input === 'string') bytes = new TextEncoder().encode(input);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function pemToBytes(pem) {
+  const body = String(pem || '')
+    .replace(/\\n/g, '\n')
+    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+    .replace(/-----END PRIVATE KEY-----/g, '')
+    .replace(/\s+/g, '');
+  const binary = atob(body);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 async function accessToken(env) {
@@ -14,17 +30,32 @@ async function accessToken(env) {
   if (tokenCache && tokenCache.expiresAt > now + 90) return tokenCache.token;
 
   const email = clean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
-  const pem = String(env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+  const pem = String(env.GOOGLE_PRIVATE_KEY || '');
   if (!email || !pem) throw new Error('Credenciais da conta de serviço não configuradas.');
 
-  const key = await importPKCS8(pem, 'RS256');
-  const assertion = await new SignJWT({ scope: DRIVE_SCOPE })
-    .setProtectedHeader({ alg: 'RS256', typ: 'JWT' })
-    .setIssuer(email)
-    .setAudience('https://oauth2.googleapis.com/token')
-    .setIssuedAt(now)
-    .setExpirationTime(now + 3600)
-    .sign(key);
+  const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const payload = b64url(JSON.stringify({
+    iss: email,
+    scope: DRIVE_SCOPE,
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  }));
+  const unsigned = `${header}.${payload}`;
+
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    pemToBytes(pem),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    key,
+    new TextEncoder().encode(unsigned),
+  );
+  const assertion = `${unsigned}.${b64url(new Uint8Array(signature))}`;
 
   const response = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
@@ -38,7 +69,6 @@ async function accessToken(env) {
   if (!response.ok || !data.access_token) {
     throw new Error(`Falha ao autenticar no Google: ${data.error_description || data.error || response.status}`);
   }
-
   tokenCache = { token: data.access_token, expiresAt: now + Number(data.expires_in || 3600) };
   return tokenCache.token;
 }
@@ -49,9 +79,76 @@ async function googleFetch(env, url, options = {}) {
   const response = await fetch(url, { ...options, headers });
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(`Google Drive respondeu ${response.status}: ${detail.slice(0, 600)}`);
+    throw new Error(`Google respondeu ${response.status}: ${detail.slice(0, 900)}`);
   }
   return response;
+}
+
+function concatBytes(parts) {
+  const normalized = parts.map(p => typeof p === 'string' ? new TextEncoder().encode(p) : new Uint8Array(p));
+  const total = normalized.reduce((n, p) => n + p.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of normalized) { out.set(p, offset); offset += p.byteLength; }
+  return out;
+}
+
+async function createTempSpreadsheet(env) {
+  const originalId = clean(env.GOOGLE_DRIVE_FILE_ID);
+  const original = await googleFetch(
+    env,
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(originalId)}?alt=media&supportsAllDrives=true`,
+  );
+  const bytes = new Uint8Array(await original.arrayBuffer());
+  const boundary = `dili_${crypto.randomUUID().replace(/-/g, '')}`;
+  const metadata = JSON.stringify({
+    name: `DILIMAGALHAES_TMP_${Date.now()}`,
+    mimeType: GSHEET_MIME,
+  });
+  const body = concatBytes([
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`,
+    `--${boundary}\r\nContent-Type: ${XLSX_MIME}\r\n\r\n`,
+    bytes,
+    `\r\n--${boundary}--`,
+  ]);
+  const created = await googleFetch(
+    env,
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,mimeType',
+    {
+      method: 'POST',
+      headers: { 'content-type': `multipart/related; boundary=${boundary}` },
+      body,
+    },
+  );
+  const data = await created.json();
+  if (!data.id) throw new Error('O Google não retornou o ID da cópia temporária da planilha.');
+  return data.id;
+}
+
+async function exportBackToOriginal(env, tempId) {
+  const originalId = clean(env.GOOGLE_DRIVE_FILE_ID);
+  const exported = await googleFetch(
+    env,
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(tempId)}/export?mimeType=${encodeURIComponent(XLSX_MIME)}`,
+  );
+  const bytes = await exported.arrayBuffer();
+  await googleFetch(
+    env,
+    `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(originalId)}?uploadType=media&supportsAllDrives=true`,
+    {
+      method: 'PATCH',
+      headers: { 'content-type': XLSX_MIME },
+      body: bytes,
+    },
+  );
+}
+
+async function deleteTemp(env, tempId) {
+  try {
+    await googleFetch(env, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(tempId)}`, { method: 'DELETE' });
+  } catch (e) {
+    console.warn('Falha ao excluir planilha temporária', e);
+  }
 }
 
 export function configured(env) {
@@ -59,27 +156,32 @@ export function configured(env) {
     .every(k => clean(env[k]));
 }
 
-export async function loadWorkbook(env) {
-  const id = clean(env.GOOGLE_DRIVE_FILE_ID);
-  const response = await googleFetch(
-    env,
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media&supportsAllDrives=true`,
-  );
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(await response.arrayBuffer());
-  return workbook;
+export async function withTempSpreadsheet(env, write, fn) {
+  const tempId = await createTempSpreadsheet(env);
+  try {
+    const result = await fn(tempId);
+    if (write) await exportBackToOriginal(env, tempId);
+    return result;
+  } finally {
+    await deleteTemp(env, tempId);
+  }
 }
 
-export async function saveWorkbook(env, workbook) {
-  const id = clean(env.GOOGLE_DRIVE_FILE_ID);
-  const bytes = await workbook.xlsx.writeBuffer();
-  await googleFetch(
+export async function sheetsGet(env, spreadsheetId, pathAndQuery = '') {
+  const response = await googleFetch(env, `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}${pathAndQuery}`);
+  return response.json();
+}
+
+export async function sheetsJson(env, spreadsheetId, pathAndQuery, method, body) {
+  const response = await googleFetch(
     env,
-    `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(id)}?uploadType=media&supportsAllDrives=true`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}${pathAndQuery}`,
     {
-      method: 'PATCH',
-      headers: { 'content-type': XLSX_MIME },
-      body: bytes,
+      method,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+      body: JSON.stringify(body),
     },
   );
+  if (response.status === 204) return {};
+  return response.json();
 }
