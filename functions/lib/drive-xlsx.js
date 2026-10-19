@@ -1,7 +1,9 @@
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const GSHEET_MIME = 'application/vnd.google-apps.spreadsheet';
+const EXPECTED_FILE_NAME = 'COPIA DE ESTUDOS.xlsx';
 let tokenCache = null;
+let fileIdCache = null;
 
 const clean = v => v === null || v === undefined ? '' : String(v).trim();
 
@@ -73,15 +75,60 @@ async function accessToken(env) {
   return tokenCache.token;
 }
 
-async function googleFetch(env, url, options = {}) {
+async function rawGoogleFetch(env, url, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set('authorization', `Bearer ${await accessToken(env)}`);
-  const response = await fetch(url, { ...options, headers });
+  return fetch(url, { ...options, headers });
+}
+
+async function googleFetch(env, url, options = {}) {
+  const response = await rawGoogleFetch(env, url, options);
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(`Google respondeu ${response.status}: ${detail.slice(0, 900)}`);
   }
   return response;
+}
+
+async function resolveOriginalId(env) {
+  const configuredId = clean(env.GOOGLE_DRIVE_FILE_ID);
+  const cacheKey = `${clean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL)}|${configuredId}`;
+  if (fileIdCache?.key === cacheKey) return fileIdCache.id;
+
+  if (configuredId) {
+    const check = await rawGoogleFetch(
+      env,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(configuredId)}?fields=id,name,mimeType&supportsAllDrives=true`,
+    );
+    if (check.ok) {
+      const meta = await check.json();
+      fileIdCache = { key: cacheKey, id: meta.id };
+      return meta.id;
+    }
+    if (check.status !== 404) {
+      const detail = await check.text();
+      throw new Error(`Google Drive respondeu ${check.status} ao validar o arquivo: ${detail.slice(0, 700)}`);
+    }
+  }
+
+  const q = `trashed = false and name contains 'COPIA DE ESTUDOS'`;
+  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,modifiedTime)&orderBy=modifiedTime%20desc&pageSize=20&supportsAllDrives=true&includeItemsFromAllDrives=true`;
+  const search = await rawGoogleFetch(env, searchUrl);
+  if (!search.ok) {
+    const detail = await search.text();
+    throw new Error(`Não foi possível localizar o XLSX no Drive (${search.status}): ${detail.slice(0, 700)}`);
+  }
+  const data = await search.json();
+  const files = Array.isArray(data.files) ? data.files : [];
+  const exact = files.find(f => f.name === EXPECTED_FILE_NAME && f.mimeType === XLSX_MIME);
+  const candidate = exact || files.find(f => f.mimeType === XLSX_MIME) || files[0];
+  if (candidate?.id) {
+    fileIdCache = { key: cacheKey, id: candidate.id };
+    return candidate.id;
+  }
+
+  const email = clean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+  throw new Error(`O arquivo não está acessível para a conta de serviço ${email}. Abra COPIA DE ESTUDOS.xlsx no Google Drive, clique em Compartilhar e adicione EXATAMENTE este e-mail como Editor: ${email}`);
 }
 
 function concatBytes(parts) {
@@ -94,7 +141,7 @@ function concatBytes(parts) {
 }
 
 async function createTempSpreadsheet(env) {
-  const originalId = clean(env.GOOGLE_DRIVE_FILE_ID);
+  const originalId = await resolveOriginalId(env);
   const original = await googleFetch(
     env,
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(originalId)}?alt=media&supportsAllDrives=true`,
@@ -122,11 +169,10 @@ async function createTempSpreadsheet(env) {
   );
   const data = await created.json();
   if (!data.id) throw new Error('O Google não retornou o ID da cópia temporária da planilha.');
-  return data.id;
+  return { tempId: data.id, originalId };
 }
 
-async function exportBackToOriginal(env, tempId) {
-  const originalId = clean(env.GOOGLE_DRIVE_FILE_ID);
+async function exportBackToOriginal(env, tempId, originalId) {
   const exported = await googleFetch(
     env,
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(tempId)}/export?mimeType=${encodeURIComponent(XLSX_MIME)}`,
@@ -157,10 +203,10 @@ export function configured(env) {
 }
 
 export async function withTempSpreadsheet(env, write, fn) {
-  const tempId = await createTempSpreadsheet(env);
+  const { tempId, originalId } = await createTempSpreadsheet(env);
   try {
     const result = await fn(tempId);
-    if (write) await exportBackToOriginal(env, tempId);
+    if (write) await exportBackToOriginal(env, tempId, originalId);
     return result;
   } finally {
     await deleteTemp(env, tempId);
