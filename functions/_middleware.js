@@ -28,6 +28,12 @@ export async function onRequest(context) {
   const { request, env, next } = context;
   const url = new URL(request.url);
 
+  if (url.pathname === '/api/datajud-cron') {
+    const response = await next();
+    response.headers.set('cache-control', 'no-store');
+    return response;
+  }
+
   if (!env.SITE_PASSWORD) {
     return new Response('SITE_PASSWORD não configurado no Cloudflare.', {status:503, headers:{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'}});
   }
