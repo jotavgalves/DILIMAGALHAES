@@ -7,3 +7,7 @@ pages_build_output_dir = "."
 binding = "DB"
 database_name = "dilimagalhaes-db"
 database_id = "605d7454-ad94-4351-9299-700da35a048b"
+
+[[mtls_certificates]]
+binding = "PJE_MNI_CERT"
+certificate_id = "00ec846c-2d41-4e32-a88a-4153c5282dca"
