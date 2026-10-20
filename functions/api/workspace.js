@@ -46,8 +46,8 @@ function summary(r) {
   return rest;
 }
 async function ensure(db) {
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS workspace_records (
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS workspace_records (
       row_id INTEGER PRIMARY KEY,
       processo TEXT,
       cliente TEXT,
@@ -58,17 +58,18 @@ async function ensure(db) {
       atualizado_em TEXT,
       payload_json TEXT NOT NULL,
       indexed_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS idx_workspace_processo ON workspace_records(processo);
-    CREATE INDEX IF NOT EXISTS idx_workspace_cliente ON workspace_records(cliente);
-    CREATE INDEX IF NOT EXISTS idx_workspace_responsavel ON workspace_records(responsavel);
-    CREATE INDEX IF NOT EXISTS idx_workspace_status ON workspace_records(status);
-    CREATE TABLE IF NOT EXISTS workspace_state (
+    )`,
+    'CREATE INDEX IF NOT EXISTS idx_workspace_processo ON workspace_records(processo)',
+    'CREATE INDEX IF NOT EXISTS idx_workspace_cliente ON workspace_records(cliente)',
+    'CREATE INDEX IF NOT EXISTS idx_workspace_responsavel ON workspace_records(responsavel)',
+    'CREATE INDEX IF NOT EXISTS idx_workspace_status ON workspace_records(status)',
+    `CREATE TABLE IF NOT EXISTS workspace_state (
       key TEXT PRIMARY KEY,
       value TEXT,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
+    )`,
+  ];
+  for (const sql of statements) await db.prepare(sql).run();
 }
 async function setState(db, key, value) {
   await db.prepare(`INSERT INTO workspace_state(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)
@@ -140,7 +141,7 @@ export async function onRequestPost(context) {
       return reply({ ok: true, engine: 'd1', ...result });
     }
     if (action === 'list') {
-      let count = await env.DB.prepare('SELECT COUNT(*) AS n FROM workspace_records').first();
+      const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM workspace_records').first();
       if (!Number(count?.n || 0)) await syncFromXlsx(env, env.DB);
       const rows = await listFromDb(env.DB);
       const last = await getState(env.DB, 'last_sync');
