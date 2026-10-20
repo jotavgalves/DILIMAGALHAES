@@ -1,6 +1,6 @@
 (()=>{
   const nativeFetch=window.fetch.bind(window);
-  const CACHE_PREFIX='dili.fast.v3:';
+  const CACHE_PREFIX='dili.fast.v4:';
   const FRESH_MS=12000;
   const STALE_MS=90000;
   const memory=new Map();
@@ -9,6 +9,7 @@
   const keyFor=body=>body.action==='list'?'list':`detail:${body.id||body.row||body.processo||''}`;
   const storageKey=key=>CACHE_PREFIX+key;
   const makeResponse=(payload,status=200)=>new Response(JSON.stringify(payload),{status,headers:{'content-type':'application/json; charset=utf-8','x-dili-cache':'1'}});
+  function emit(name,detail={}){try{window.dispatchEvent(new CustomEvent(name,{detail}))}catch{}}
   function readCache(key){
     const now=Date.now();
     const mem=memory.get(key);
@@ -18,11 +19,11 @@
       if(!raw)return null;
       const item=JSON.parse(raw);
       if(!item||!item.t||now-item.t>=STALE_MS){sessionStorage.removeItem(storageKey(key));return null;}
-      memory.set(key,item); return item;
+      memory.set(key,item);return item;
     }catch{return null;}
   }
   function writeCache(key,data){
-    const item={t:Date.now(),data}; memory.set(key,item);
+    const item={t:Date.now(),data};memory.set(key,item);
     try{sessionStorage.setItem(storageKey(key),JSON.stringify(item));}catch{}
   }
   function clearCache(){
@@ -34,11 +35,11 @@
     const p=(async()=>{
       const r=await nativeFetch('/api/workspace',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
       const text=await r.text();
-      let data=null; try{data=JSON.parse(text)}catch{}
+      let data=null;try{data=JSON.parse(text)}catch{}
       if(r.ok&&data)writeCache(key,data);
-      return {ok:r.ok,status:r.status,text,data};
+      return{ok:r.ok,status:r.status,text,data};
     })().finally(()=>inflight.delete(key));
-    inflight.set(key,p); return p;
+    inflight.set(key,p);return p;
   }
   async function fastWorkspace(body){
     const key=keyFor(body),cached=readCache(key),age=cached?Date.now()-cached.t:Infinity;
@@ -51,6 +52,10 @@
       if(cached)return makeResponse(cached.data);
       throw e;
     }
+  }
+  function repairMirror(){
+    nativeFetch('/api/workspace',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'sync'})})
+      .then(r=>{if(r.ok)emit('dili:mirror-repaired')}).catch(()=>{});
   }
   window.addEventListener('pageshow',e=>{if(e.persisted)clearCache()});
   document.addEventListener('click',e=>{const a=e.target?.closest?.('a[href="/__logout"]');if(a)clearCache();},{capture:true});
@@ -67,7 +72,13 @@
         return nativeFetch(input,init);
       }
       const r=await nativeFetch(input,init);
-      if(r.ok)clearCache();
+      if(r.ok){
+        clearCache();
+        r.clone().json().then(data=>{
+          emit('dili:write',{action:body.action||'',d1Mirrored:data?.d1Mirrored});
+          if(data?.d1Mirrored===false)repairMirror();
+        }).catch(()=>emit('dili:write',{action:body.action||''}));
+      }
       return r;
     }
     return nativeFetch(input,init);
