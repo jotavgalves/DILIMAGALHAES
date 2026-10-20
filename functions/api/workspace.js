@@ -1,6 +1,7 @@
 import { configured, loadWorkbook, getMainRows } from '../lib/drive-xlsx.js';
 
 const WIDTH = 21;
+const STALE_SECONDS = 900;
 const COL = {
   historico: 15, tarefas: 16, comentarios: 17, meta: 18, versao: 19, ultimoEditor: 20,
 };
@@ -118,7 +119,7 @@ async function detailFromDb(db, input) {
   if (!row) return null;
   try { return JSON.parse(row.payload_json); } catch { return null; }
 }
-function isStale(state, seconds = 120) {
+function isStale(state, seconds = STALE_SECONDS) {
   const t = Date.parse(state?.value || '');
   return !Number.isFinite(t) || Date.now() - t > seconds * 1000;
 }
@@ -134,7 +135,7 @@ export async function onRequestPost(context) {
     if (action === 'status') {
       const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM workspace_records').first();
       const last = await getState(env.DB, 'last_sync');
-      return reply({ ok: true, engine: 'd1', count: Number(count?.n || 0), lastSync: last?.value || null });
+      return reply({ ok: true, engine: 'd1', count: Number(count?.n || 0), lastSync: last?.value || null, staleAfterSeconds: STALE_SECONDS });
     }
     if (action === 'sync') {
       const result = await syncFromXlsx(env, env.DB);
