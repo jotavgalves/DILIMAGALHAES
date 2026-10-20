@@ -153,6 +153,42 @@ function detailed(row, rowNumber) {
     comments: json(row[COL.comentarios], []), meta: json(row[COL.meta], {}),
   };
 }
+function d1UpsertStatement(db, row, rowNumber) {
+  const r = detailed(row, rowNumber);
+  return db.prepare(`INSERT INTO workspace_records
+    (row_id,processo,cliente,responsavel,status,prioridade,proxima_data,atualizado_em,payload_json,indexed_at)
+    VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+    ON CONFLICT(row_id) DO UPDATE SET
+      processo=excluded.processo,cliente=excluded.cliente,responsavel=excluded.responsavel,status=excluded.status,
+      prioridade=excluded.prioridade,proxima_data=excluded.proxima_data,atualizado_em=excluded.atualizado_em,
+      payload_json=excluded.payload_json,indexed_at=CURRENT_TIMESTAMP`).bind(
+        rowNumber,r.processo,r.cliente,r.responsavel,r.status,r.prioridade,r.proximaData,r.atualizadoEm,JSON.stringify(r)
+      );
+}
+async function mirrorD1(env, row, rowNumber) {
+  if (!env.DB) return false;
+  try {
+    await d1UpsertStatement(env.DB,row,rowNumber).run();
+    await env.DB.prepare(`INSERT INTO workspace_state(key,value,updated_at) VALUES('last_mutation',?,CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`).bind(new Date().toISOString()).run();
+    return true;
+  } catch (e) {
+    console.error('DILIMAGALHAES D1 MIRROR',e);
+    return false;
+  }
+}
+async function mirrorManyD1(env, entries) {
+  if (!env.DB || !entries.length) return false;
+  try {
+    await env.DB.batch(entries.map(x=>d1UpsertStatement(env.DB,x.row,x.rowNumber)));
+    await env.DB.prepare(`INSERT INTO workspace_state(key,value,updated_at) VALUES('last_mutation',?,CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`).bind(new Date().toISOString()).run();
+    return true;
+  } catch (e) {
+    console.error('DILIMAGALHAES D1 BATCH MIRROR',e);
+    return false;
+  }
+}
 async function loadListFresh(env) {
   const book = await loadWorkbook(env), { out } = listRows(book);
   await writeListCache(env, out);
@@ -198,7 +234,8 @@ export async function onRequestPost({ request, env }) {
       const rowNumber = nextMainRow(book), row = makeRow(data, [], who, 'create');
       setMainRow(book, rowNumber, row);
       await saveWorkbook(env, book); await clearListCache(env);
-      return reply({ ok:true, row:rowNumber, versao:Number(row[COL.versao]), source:'google-drive-xlsx-direct' });
+      const d1Mirrored=await mirrorD1(env,row,rowNumber);
+      return reply({ ok:true, row:rowNumber, versao:Number(row[COL.versao]), source:'google-drive-xlsx-direct', d1Mirrored });
     }
     if (action === 'update') {
       const data=input.record||{}, f=findRow(rows,data), existing=fullRow(f.row);
@@ -206,20 +243,22 @@ export async function onRequestPost({ request, env }) {
       if (expected && expected!==current) return reply({ error:'Este processo foi alterado por outra pessoa. Atualize a tela antes de salvar.', code:'VERSION_CONFLICT', currentVersion:current },409);
       const row=makeRow(data,existing,who,'update');
       setMainRow(book,f.rowNumber,row); await saveWorkbook(env,book); await clearListCache(env);
-      return reply({ ok:true,row:f.rowNumber,versao:Number(row[COL.versao]),source:'google-drive-xlsx-direct' });
+      const d1Mirrored=await mirrorD1(env,row,f.rowNumber);
+      return reply({ ok:true,row:f.rowNumber,versao:Number(row[COL.versao]),source:'google-drive-xlsx-direct',d1Mirrored });
     }
     if (action === 'datajud.batchSave') {
       const updates = Array.isArray(input.updates) ? input.updates.slice(0,50) : [];
-      let changed=0;
+      let changed=0; const mirrored=[];
       for (const u of updates) {
         try {
           const f=findRow(rows,u), row=fullRow(f.row), meta={...json(row[COL.meta],{}),datajud:u.datajud||null};
           row[COL.meta]=jsonText(meta); row[COL.versao]=String(Number(row[COL.versao]||1)+1); row[COL.ultimoEditor]=who;
-          setMainRow(book,f.rowNumber,row); changed++;
+          setMainRow(book,f.rowNumber,row); mirrored.push({row,rowNumber:f.rowNumber}); changed++;
         } catch {}
       }
-      if (changed) { await saveWorkbook(env,book); await clearListCache(env); }
-      return reply({ ok:true, changed });
+      let d1Mirrored=false;
+      if (changed) { await saveWorkbook(env,book); await clearListCache(env); d1Mirrored=await mirrorManyD1(env,mirrored); }
+      return reply({ ok:true, changed, d1Mirrored });
     }
 
     const f=findRow(rows,input), row=fullRow(f.row);
@@ -248,7 +287,8 @@ export async function onRequestPost({ request, env }) {
     } else throw new Error(`Ação inválida: ${action || '(vazia)'}`);
 
     setMainRow(book,f.rowNumber,row); await saveWorkbook(env,book); await clearListCache(env);
-    return reply({ ok:true,row:f.rowNumber,versao:Number(row[COL.versao]),source:'google-drive-xlsx-direct' });
+    const d1Mirrored=await mirrorD1(env,row,f.rowNumber);
+    return reply({ ok:true,row:f.rowNumber,versao:Number(row[COL.versao]),source:'google-drive-xlsx-direct',d1Mirrored });
   } catch (e) {
     console.error('DILIMAGALHAES API', e);
     return reply({ error:e.message || 'Falha ao acessar o XLSX.' },502);
