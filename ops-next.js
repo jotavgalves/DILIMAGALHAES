@@ -5,6 +5,7 @@
   let rowsCache=[];
   let applying=false;
   let lastSignature='';
+  let refreshScheduled=false;
 
   const clean=v=>String(v??'').trim();
   const norm=s=>clean(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
@@ -15,11 +16,7 @@
     if(Number.isNaN(d.getTime()))return null;
     return Math.max(0,Math.floor((Date.now()-d.getTime())/86400000));
   };
-  const classify=r=>{
-    const raw=clean(r.status);
-    if(raw)return raw;
-    return 'A diligenciar';
-  };
+  const classify=r=>clean(r.status)||'A diligenciar';
   const risk=r=>{
     let score=0;
     const age=daysSince(r.atualizadoEm||r.dataSolicitacao);
@@ -51,15 +48,6 @@
     let t=document.querySelector('#opsToast');
     if(!t){t=document.createElement('div');t.id='opsToast';t.style.cssText='position:fixed;right:22px;bottom:22px;z-index:9999;padding:12px 14px;border-radius:10px;background:#103d35;color:#fff;font:600 12px system-ui;box-shadow:0 10px 30px #0003;max-width:360px';document.body.appendChild(t);}
     t.style.background=error?'#8f312b':'#103d35';t.textContent=msg;t.hidden=false;clearTimeout(t._timer);t._timer=setTimeout(()=>t.hidden=true,3200);
-  }
-
-  function removeDashboard(){
-    const cockpit=document.querySelector('[data-view="cockpit"]');
-    if(cockpit)cockpit.style.display='none';
-    document.querySelectorAll('[data-view="inbox"] span').forEach(s=>{if(/Caixa de entrada/i.test(s.textContent))s.textContent='Hoje';});
-    const activeCockpit=document.querySelector('[data-view="cockpit"].active');
-    if(activeCockpit){document.querySelector('[data-view="inbox"]')?.click();return true;}
-    return false;
   }
 
   function addOpsHeader(){
@@ -108,18 +96,23 @@
     all.forEach((tr,i)=>{
       let td=tr.querySelector('td.ops-check');
       if(!td){td=document.createElement('td');td.className='ops-check';td.innerHTML=`<input type="checkbox" data-ops-check="${tr.dataset.row}" aria-label="Selecionar processo">`;tr.insertBefore(td,tr.firstChild);}
-      td.querySelector('input').checked=selected.has(String(tr.dataset.row));
-      tr.hidden=!(i>=(page-1)*PAGE_SIZE&&i<page*PAGE_SIZE);
+      const input=td.querySelector('input'),checked=selected.has(String(tr.dataset.row));
+      if(input.checked!==checked)input.checked=checked;
+      const shouldHide=!(i>=(page-1)*PAGE_SIZE&&i<page*PAGE_SIZE);
+      if(tr.hidden!==shouldHide)tr.hidden=shouldHide;
       const rec=rowsCache.find(r=>String(r.id)===String(tr.dataset.row));
-      if(rec){const pill=tr.querySelector('.risk-pill');if(pill){pill.textContent=String(risk(rec));pill.title=daysSince(rec.atualizadoEm||rec.dataSolicitacao)===null?'Sem data de atualização: idade não pontua no risco':'Risco recalculado sem penalizar ausência de data';}}
+      if(rec){const pill=tr.querySelector('.risk-pill');if(pill){const v=String(risk(rec));if(pill.textContent!==v)pill.textContent=v;const title=daysSince(rec.atualizadoEm||rec.dataSolicitacao)===null?'Sem data de atualização: idade não pontua no risco':'Risco recalculado sem penalizar ausência de data';if(pill.title!==title)pill.title=title;}}
     });
     const head=table.tHead?.rows?.[0];if(head&&!head.querySelector('th.ops-check-head')){const th=document.createElement('th');th.className='ops-check-head';th.textContent='';head.insertBefore(th,head.firstChild);}
-    let pager=table.parentNode.querySelector('.ops-pager');if(!pager){pager=document.createElement('div');pager.className='ops-pager';pager.style.cssText='display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid #edf2ef';table.parentNode.appendChild(pager);}pager.innerHTML=`<button class="btn secondary" data-ops="prev" ${page<=1?'disabled':''}>Anterior</button><span style="font-size:11px;color:#6f7f79">Página ${page} de ${pages} · ${total} registros</span><button class="btn secondary" data-ops="next" ${page>=pages?'disabled':''}>Próxima</button>`;
+    let pager=table.parentNode.querySelector('.ops-pager');if(!pager){pager=document.createElement('div');pager.className='ops-pager';pager.style.cssText='display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:10px 12px;border-top:1px solid #edf2ef';table.parentNode.appendChild(pager);}
+    const pagerHtml=`<button class="btn secondary" data-ops="prev" ${page<=1?'disabled':''}>Anterior</button><span style="font-size:11px;color:#6f7f79">Página ${page} de ${pages} · ${total} registros</span><button class="btn secondary" data-ops="next" ${page>=pages?'disabled':''}>Próxima</button>`;
+    if(pager.innerHTML!==pagerHtml)pager.innerHTML=pagerHtml;
     ensureBulkToolbar();updateSelectionCount();
   }
 
   function updateSelectionCount(){
-    document.querySelectorAll('.ops-count,#opsSelection').forEach(el=>el.textContent=selected.size?`${selected.size} selecionado(s)`:'' );
+    const text=selected.size?`${selected.size} selecionado(s)`:'';
+    document.querySelectorAll('.ops-count,#opsSelection').forEach(el=>{if(el.textContent!==text)el.textContent=text;});
   }
 
   async function applyBulk(){
@@ -159,16 +152,23 @@
     }catch(e){toast(e.message||'Falha no Radar DataJud.',true);}
   }
 
-  document.addEventListener('change',e=>{const c=e.target?.closest?.('[data-ops-check]');if(!c)return;const id=String(c.dataset.opsCheck);c.checked?selected.add(id):selected.delete(id);updateSelectionCount();});
-  document.addEventListener('click',e=>{const el=e.target?.closest?.('[data-ops]');if(!el)return;const a=el.dataset.ops;if(a==='prev'){page=Math.max(1,page-1);enhanceTable();}else if(a==='next'){page++;enhanceTable();}else if(a==='selectall'){document.querySelectorAll('.cases-table tbody tr[data-row]:not([hidden])').forEach(tr=>selected.add(String(tr.dataset.row)));enhanceTable();}else if(a==='clearselect'){selected.clear();enhanceTable();}else if(a==='applybulk')applyBulk();else if(a==='saveview')saveCurrentView();else if(a==='saved')showSavedViews();else if(a==='smartdatajud')smartDataJud();});
-
-  async function refresh(){
-    if(removeDashboard())return;
+  function refresh(){
     addOpsHeader();
     if(document.querySelector('.cases-table'))enhanceTable();
   }
+  function scheduleRefresh(){
+    if(refreshScheduled)return;
+    refreshScheduled=true;
+    requestAnimationFrame(()=>{refreshScheduled=false;refresh();});
+  }
 
-  const mo=new MutationObserver(()=>queueMicrotask(refresh));
-  mo.observe(document.documentElement,{subtree:true,childList:true});
-  window.addEventListener('load',async()=>{try{await workspaceList();}catch{}refresh();},{once:true});
+  document.addEventListener('change',e=>{const c=e.target?.closest?.('[data-ops-check]');if(!c)return;const id=String(c.dataset.opsCheck);c.checked?selected.add(id):selected.delete(id);updateSelectionCount();});
+  document.addEventListener('click',e=>{const el=e.target?.closest?.('[data-ops]');if(!el)return;const a=el.dataset.ops;if(a==='prev'){page=Math.max(1,page-1);enhanceTable();}else if(a==='next'){page++;enhanceTable();}else if(a==='selectall'){document.querySelectorAll('.cases-table tbody tr[data-row]:not([hidden])').forEach(tr=>selected.add(String(tr.dataset.row)));enhanceTable();}else if(a==='clearselect'){selected.clear();enhanceTable();}else if(a==='applybulk')applyBulk();else if(a==='saveview')saveCurrentView();else if(a==='saved')showSavedViews();else if(a==='smartdatajud')smartDataJud();});
+
+  const mo=new MutationObserver(mutations=>{
+    if(!mutations.some(m=>m.target?.closest?.('#app')||m.target?.id==='app'))return;
+    scheduleRefresh();
+  });
+  const app=document.querySelector('#app');if(app)mo.observe(app,{subtree:true,childList:true});
+  window.addEventListener('load',async()=>{try{await workspaceList();}catch{}scheduleRefresh();},{once:true});
 })();
