@@ -2,3 +2,8 @@ name = "dilimagalhaes"
 compatibility_date = "2026-10-19"
 compatibility_flags = ["nodejs_compat"]
 pages_build_output_dir = "."
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dilimagalhaes-db"
+database_id = "605d7454-ad94-4351-9299-700da35a048b"
