@@ -26,8 +26,26 @@
   async function selectedProcess(){await prefillSelected();const v=clean(document.querySelector('#pjeMniProcess')?.value);if(!v)return toast('Clique antes em um processo da lista ou pesquise um CNJ.',true);query();}
   function activeModal(results){document.querySelector('#pjeBatchModal')?.remove();const m=document.createElement('div');m.id='pjeBatchModal';m.style.cssText='position:fixed;inset:0;z-index:10030;background:rgba(8,25,21,.52);display:grid;place-items:center;padding:28px';const rows=(results||[]).map(x=>`<div style="display:grid;grid-template-columns:1fr auto auto;gap:10px;padding:10px;border-bottom:1px solid #edf2ef;align-items:center"><div><b style="font-size:11px">${esc(x.processo)}</b><div style="font-size:10px;color:#71817b">${esc(x.summary?.currentOrgan||'Órgão não informado')}</div></div><span style="font-size:10px;font-weight:800">${esc(x.summary?.currentDegreeLabel||'Não localizado')}</span><span style="font-size:9px">${x.summary?.hasNewMovement?'nova movimentação':'sem mudança'}</span></div>`).join('');m.innerHTML=`<section style="width:min(880px,100%);max-height:82vh;overflow:auto;background:white;border-radius:16px"><header style="position:sticky;top:0;background:white;padding:15px 17px;border-bottom:1px solid #e5ebe8;display:flex;justify-content:space-between"><div><b>Ativos TJPE no PJe</b><div style="font-size:10px;color:#71817b">${results.length} processo(s) consultado(s)</div></div><button class="btn secondary" data-pje-batch-close>Fechar</button></header>${rows||'<div style="padding:24px;text-align:center">Nenhum processo consultado.</div>'}</section>`;document.body.appendChild(m);}
   async function checkActive(){if(running)return;running=true;toast('Consultando processos ativos do TJPE em lotes...');try{const d=await workspace('list');lastRows=(d.rows||[]).filter(r=>isTJPE(r)&&!isFinal(r));const all=[];for(let i=0;i<lastRows.length;i+=20){const chunk=lastRows.slice(i,i+20),items=[];for(const r of chunk){const prev=await previousFor(r.processo);items.push({processo:r.processo,known:knownFrom(prev.pje)});}const out=await call({action:'batch',degree:'both',processos:items,movimentos:true,incluirCabecalho:true,incluirDocumentos:false});all.push(...(out.results||[]));}activeModal(all);toast(`PJe TJPE: ${all.filter(x=>x.ok).length}/${all.length} processo(s) localizado(s).`);}catch(e){toast(e.message||'Falha na varredura PJe.',true);}finally{running=false;}}
-  function inject(){const strip=document.querySelector('#opsStrip');if(!strip||strip.querySelector('[data-pje-mni]'))return;const b=document.createElement('button');b.className='btn secondary';b.dataset.pjeMni='1';b.textContent='PJe PE';const anchor=strip.querySelector('#opsSelection');strip.insertBefore(b,anchor||null);}
+  function inject(){
+    if(!document.querySelector('[data-pje-floating]')){
+      const floating=document.createElement('button');
+      floating.type='button';
+      floating.className='btn primary';
+      floating.dataset.pjeMni='1';
+      floating.dataset.pjeFloating='1';
+      floating.textContent='PJe PE';
+      floating.title='Abrir consulta PJe MNI TJPE · 1º e 2º graus';
+      floating.style.cssText='position:fixed;right:22px;bottom:22px;z-index:10005;box-shadow:0 10px 26px rgba(16,61,53,.24);min-width:92px';
+      document.body.appendChild(floating);
+    }
+    const strip=document.querySelector('#opsStrip');
+    if(strip&&!strip.querySelector('[data-pje-toolbar]')){
+      const b=document.createElement('button');b.type='button';b.className='btn secondary';b.dataset.pjeMni='1';b.dataset.pjeToolbar='1';b.textContent='PJe PE';
+      const anchor=strip.querySelector('#opsSelection');strip.insertBefore(b,anchor||null);
+    }
+  }
   document.addEventListener('click',e=>{const row=e.target.closest?.('[data-row]');if(row?.dataset?.row)lastClickedRow=row.dataset.row;if(e.target.closest('[data-pje-mni]'))openModal();else if(e.target.closest('[data-pje-close]'))document.querySelector('#pjeMniModal')?.remove();else if(e.target.closest('[data-pje-query]'))query();else if(e.target.closest('[data-pje-save]'))saveCurrent();else if(e.target.closest('[data-pje-selected]'))selectedProcess();else if(e.target.closest('[data-pje-active]'))checkActive();else if(e.target.closest('[data-pje-batch-close]'))document.querySelector('#pjeBatchModal')?.remove();});
   document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target?.id==='pjeMniProcess')query();});
-  const mo=new MutationObserver(()=>{if(document.querySelector('#opsStrip'))inject();});mo.observe(document.documentElement,{subtree:true,childList:true});window.addEventListener('load',inject,{once:true});
+  const mo=new MutationObserver(()=>inject());mo.observe(document.documentElement,{subtree:true,childList:true});
+  inject();window.addEventListener('load',inject,{once:true});
 })();
