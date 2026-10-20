@@ -1,6 +1,6 @@
 (()=>{
   const nativeFetch=window.fetch.bind(window);
-  const CACHE_PREFIX='dili.fast.v4:';
+  const CACHE_PREFIX='dili.fast.v5:';
   const FRESH_MS=12000;
   const STALE_MS=90000;
   const memory=new Map();
@@ -70,6 +70,17 @@
           if(wr.ok)return wr;
         }catch{}
         return nativeFetch(input,init);
+      }
+      if(body.action==='datajud.batchSave'){
+        const r=await nativeFetch('/api/datajud-persist',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({updates:body.updates||[],actor:body.actor||'DataJud manual'})});
+        if(r.ok){
+          clearCache();
+          r.clone().json().then(data=>{
+            emit('dili:write',{action:'datajud.batchSave',d1Mirrored:data?.d1Mirrored,xlsxSaved:data?.xlsxSaved});
+            if(data?.d1Mirrored===false)repairMirror();
+          }).catch(()=>{});
+        }
+        return r;
       }
       const r=await nativeFetch(input,init);
       if(r.ok){
