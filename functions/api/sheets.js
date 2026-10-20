@@ -14,6 +14,30 @@ const reply = (data, status = 200) => new Response(JSON.stringify(data), {
   headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
 });
 
+function cacheRequest(env) {
+  const id = clean(env.GOOGLE_DRIVE_FILE_ID) || 'default';
+  return new Request(`https://dilimagalhaes-cache.local/list/${encodeURIComponent(id)}`);
+}
+async function readListCache(env) {
+  try {
+    if (!globalThis.caches?.default) return null;
+    const r = await caches.default.match(cacheRequest(env));
+    return r ? await r.json() : null;
+  } catch { return null; }
+}
+async function writeListCache(env, rows) {
+  try {
+    if (!globalThis.caches?.default) return;
+    const r = new Response(JSON.stringify({ rows, source:'google-drive-xlsx-direct-cache', cachedAt:new Date().toISOString() }), {
+      headers:{'content-type':'application/json','cache-control':'public, max-age=45'}
+    });
+    await caches.default.put(cacheRequest(env), r);
+  } catch {}
+}
+async function clearListCache(env) {
+  try { if (globalThis.caches?.default) await caches.default.delete(cacheRequest(env)); } catch {}
+}
+
 function iso(v) {
   const s = clean(v);
   if (!s) return '';
@@ -52,7 +76,7 @@ function record(row, rowNumber) {
     prioridade: clean(row[12]) || 'Normal', proximaAcao: clean(row[13]), proximaData: iso(row[14]),
     versao: Number(row[COL.versao] || 1), ultimoEditor: clean(row[COL.ultimoEditor]),
     historyCount: Array.isArray(history) ? history.length : 0,
-    taskCount: Array.isArray(tasks) ? tasks.filter(t => clean(t.status).toLowerCase() !== 'concluída' && clean(t.status).toLowerCase() !== 'concluida').length : 0,
+    taskCount: Array.isArray(tasks) ? tasks.filter(t => !/conclu/i.test(clean(t.status))).length : 0,
     commentCount: Array.isArray(comments) ? comments.length : 0,
     favorito: Boolean(meta?.favorito), tags: Array.isArray(meta?.tags) ? meta.tags : [], decisionOwner: clean(meta?.decisionOwner),
     datajud: meta?.datajud || null,
@@ -88,7 +112,7 @@ function makeRow(data = {}, existing = [], who = 'Sistema', mode = 'update') {
   }
   row[COL.atualizadoEm] = nowBRDate();
   if (!clean(row[COL.prioridade])) row[COL.prioridade] = 'Normal';
-  row[COL.versao] = String(Math.max(1, Number(row[COL.versao] || 0) + (mode === 'create' ? 1 : 1)));
+  row[COL.versao] = String(Math.max(1, Number(row[COL.versao] || 0) + 1));
   row[COL.ultimoEditor] = who;
   addHistory(row, { tipo: mode === 'create' ? 'Cadastro' : 'Atualização', texto: mode === 'create' ? 'Processo incluído pelo sistema.' : 'Dados da diligência atualizados.', usuario: who });
   return row;
@@ -106,18 +130,23 @@ function findRow(rows, input) {
 function detailed(row, rowNumber) {
   return {
     ...record(row, rowNumber),
-    history: json(row[COL.historico], []),
-    tasks: json(row[COL.tarefas], []),
-    comments: json(row[COL.comentarios], []),
-    meta: json(row[COL.meta], {}),
+    history: json(row[COL.historico], []), tasks: json(row[COL.tarefas], []),
+    comments: json(row[COL.comentarios], []), meta: json(row[COL.meta], {}),
   };
+}
+async function loadListFresh(env) {
+  const book = await loadWorkbook(env), { out } = listRows(book);
+  await writeListCache(env, out);
+  return out;
 }
 
 export async function onRequestGet({ env }) {
   if (!configured(env)) return reply({ error: 'Integração Google Drive não configurada.' }, 503);
   try {
-    const book = await loadWorkbook(env), { out } = listRows(book);
-    return reply({ ok: true, source: 'google-drive-xlsx-direct', sheet: 'Planilha Geral', rows: out.length });
+    const cached = await readListCache(env);
+    if (cached?.rows) return reply({ ok:true, source:'cache', sheet:'Planilha Geral', rows:cached.rows.length, cached:true });
+    const out = await loadListFresh(env);
+    return reply({ ok:true, source:'google-drive-xlsx-direct', sheet:'Planilha Geral', rows:out.length });
   } catch (e) {
     console.error('DILIMAGALHAES GET', e);
     return reply({ error: e.message || 'Falha ao acessar a planilha.' }, 502);
@@ -127,74 +156,82 @@ export async function onRequestGet({ env }) {
 export async function onRequestPost({ request, env }) {
   if (!configured(env)) return reply({ error: 'Integração Google Drive não configurada.' }, 503);
   let input;
-  try { input = await request.json(); } catch { return reply({ error: 'JSON inválido.' }, 400); }
+  try { input = await request.json(); } catch { return reply({ error:'JSON inválido.' },400); }
   const action = clean(input.action), who = actor(input);
   try {
-    const book = await loadWorkbook(env), { rows, out } = listRows(book);
-    if (action === 'list') return reply({ rows: out, source: 'google-drive-xlsx-direct' });
+    if (action === 'list') {
+      const cached = await readListCache(env);
+      if (cached?.rows) return reply({ rows:cached.rows, source:'cache', cached:true, cachedAt:cached.cachedAt });
+      const out = await loadListFresh(env);
+      return reply({ rows:out, source:'google-drive-xlsx-direct', cached:false });
+    }
+
+    const book = await loadWorkbook(env), { rows } = listRows(book);
     ensureHeaders(book, rows);
 
     if (action === 'detail') {
       const f = findRow(rows, input);
-      return reply({ row: detailed(f.row, f.rowNumber) });
+      return reply({ row:detailed(f.row, f.rowNumber) });
     }
     if (action === 'create') {
       const data = input.record || {};
       if (!clean(data.processo)) throw new Error('Número do processo é obrigatório.');
       const rowNumber = nextMainRow(book), row = makeRow(data, [], who, 'create');
       setMainRow(book, rowNumber, row);
-      await saveWorkbook(env, book);
-      return reply({ ok: true, row: rowNumber, versao: Number(row[COL.versao]), source: 'google-drive-xlsx-direct' });
+      await saveWorkbook(env, book); await clearListCache(env);
+      return reply({ ok:true, row:rowNumber, versao:Number(row[COL.versao]), source:'google-drive-xlsx-direct' });
     }
     if (action === 'update') {
-      const data = input.record || {}, f = findRow(rows, data), existing = fullRow(f.row);
-      const expected = Number(data.versao || input.expectedVersion || 0), current = Number(existing[COL.versao] || 1);
-      if (expected && expected !== current) return reply({ error: 'Este processo foi alterado por outra pessoa. Atualize a tela antes de salvar.', code: 'VERSION_CONFLICT', currentVersion: current }, 409);
-      const row = makeRow(data, existing, who, 'update');
-      setMainRow(book, f.rowNumber, row);
-      await saveWorkbook(env, book);
-      return reply({ ok: true, row: f.rowNumber, versao: Number(row[COL.versao]), source: 'google-drive-xlsx-direct' });
+      const data=input.record||{}, f=findRow(rows,data), existing=fullRow(f.row);
+      const expected=Number(data.versao||input.expectedVersion||0), current=Number(existing[COL.versao]||1);
+      if (expected && expected!==current) return reply({ error:'Este processo foi alterado por outra pessoa. Atualize a tela antes de salvar.', code:'VERSION_CONFLICT', currentVersion:current },409);
+      const row=makeRow(data,existing,who,'update');
+      setMainRow(book,f.rowNumber,row); await saveWorkbook(env,book); await clearListCache(env);
+      return reply({ ok:true,row:f.rowNumber,versao:Number(row[COL.versao]),source:'google-drive-xlsx-direct' });
+    }
+    if (action === 'datajud.batchSave') {
+      const updates = Array.isArray(input.updates) ? input.updates.slice(0,50) : [];
+      let changed=0;
+      for (const u of updates) {
+        try {
+          const f=findRow(rows,u), row=fullRow(f.row), meta={...json(row[COL.meta],{}),datajud:u.datajud||null};
+          row[COL.meta]=jsonText(meta); row[COL.versao]=String(Number(row[COL.versao]||1)+1); row[COL.ultimoEditor]=who;
+          setMainRow(book,f.rowNumber,row); changed++;
+        } catch {}
+      }
+      if (changed) { await saveWorkbook(env,book); await clearListCache(env); }
+      return reply({ ok:true, changed });
     }
 
-    const f = findRow(rows, input), row = fullRow(f.row);
-    if (action === 'history.list') return reply({ rows: json(row[COL.historico], []) });
-    if (action === 'history.add') {
-      addHistory(row, { ...(input.entry || {}), usuario: who });
-      row[COL.versao] = String(Number(row[COL.versao] || 1) + 1); row[COL.ultimoEditor] = who; row[COL.atualizadoEm] = nowBRDate();
-    } else if (action === 'task.list') return reply({ rows: json(row[COL.tarefas], []) });
-    else if (action === 'task.create') {
-      const arr = json(row[COL.tarefas], []), task = input.task || {};
-      arr.unshift({ id: uuid(), tarefa: clean(task.tarefa), responsavel: clean(task.responsavel), prazo: iso(task.prazo), status: clean(task.status) || 'Aberta', criadoEm: nowBRFull(), criadoPor: who });
-      row[COL.tarefas] = jsonText(arr.slice(0, 200));
-      addHistory(row, { tipo: 'Tarefa', texto: `Tarefa criada: ${clean(task.tarefa)}`, usuario: who });
-      row[COL.versao] = String(Number(row[COL.versao] || 1) + 1); row[COL.ultimoEditor] = who;
-    } else if (action === 'task.update') {
-      const arr = json(row[COL.tarefas], []), id = clean(input.task?.id);
-      const idx = arr.findIndex(t => clean(t.id) === id); if (idx < 0) throw new Error('Tarefa não encontrada.');
-      arr[idx] = { ...arr[idx], ...input.task, atualizadoEm: nowBRFull(), atualizadoPor: who };
-      row[COL.tarefas] = jsonText(arr);
-      addHistory(row, { tipo: 'Tarefa', texto: `Tarefa atualizada: ${clean(arr[idx].tarefa)}`, usuario: who });
-      row[COL.versao] = String(Number(row[COL.versao] || 1) + 1); row[COL.ultimoEditor] = who;
-    } else if (action === 'comment.list') return reply({ rows: json(row[COL.comentarios], []) });
-    else if (action === 'comment.add') {
-      const arr = json(row[COL.comentarios], []), texto = clean(input.texto);
-      if (!texto) throw new Error('Comentário vazio.');
-      arr.unshift({ id: uuid(), texto, usuario: who, data: nowBRFull() });
-      row[COL.comentarios] = jsonText(arr.slice(0, 250));
-      addHistory(row, { tipo: 'Comentário', texto, usuario: who });
-      row[COL.versao] = String(Number(row[COL.versao] || 1) + 1); row[COL.ultimoEditor] = who;
-    } else if (action === 'meta.patch') {
-      const meta = { ...json(row[COL.meta], {}), ...(input.patch || {}) };
-      row[COL.meta] = jsonText(meta);
-      addHistory(row, { tipo: 'Sistema', texto: 'Metadados operacionais atualizados.', usuario: who });
-      row[COL.versao] = String(Number(row[COL.versao] || 1) + 1); row[COL.ultimoEditor] = who;
+    const f=findRow(rows,input), row=fullRow(f.row);
+    if (action==='history.list') return reply({ rows:json(row[COL.historico],[]) });
+    if (action==='history.add') {
+      addHistory(row,{...(input.entry||{}),usuario:who});
+      row[COL.versao]=String(Number(row[COL.versao]||1)+1); row[COL.ultimoEditor]=who; row[COL.atualizadoEm]=nowBRDate();
+    } else if (action==='task.list') return reply({ rows:json(row[COL.tarefas],[]) });
+    else if (action==='task.create') {
+      const arr=json(row[COL.tarefas],[]), task=input.task||{};
+      arr.unshift({id:uuid(),tarefa:clean(task.tarefa),responsavel:clean(task.responsavel),prazo:iso(task.prazo),status:clean(task.status)||'Aberta',criadoEm:nowBRFull(),criadoPor:who});
+      row[COL.tarefas]=jsonText(arr.slice(0,200)); addHistory(row,{tipo:'Tarefa',texto:`Tarefa criada: ${clean(task.tarefa)}`,usuario:who});
+      row[COL.versao]=String(Number(row[COL.versao]||1)+1); row[COL.ultimoEditor]=who;
+    } else if (action==='task.update') {
+      const arr=json(row[COL.tarefas],[]), id=clean(input.task?.id), idx=arr.findIndex(t=>clean(t.id)===id); if(idx<0) throw new Error('Tarefa não encontrada.');
+      arr[idx]={...arr[idx],...input.task,atualizadoEm:nowBRFull(),atualizadoPor:who}; row[COL.tarefas]=jsonText(arr);
+      addHistory(row,{tipo:'Tarefa',texto:`Tarefa atualizada: ${clean(arr[idx].tarefa)}`,usuario:who}); row[COL.versao]=String(Number(row[COL.versao]||1)+1); row[COL.ultimoEditor]=who;
+    } else if (action==='comment.list') return reply({ rows:json(row[COL.comentarios],[]) });
+    else if (action==='comment.add') {
+      const arr=json(row[COL.comentarios],[]), texto=clean(input.texto); if(!texto) throw new Error('Comentário vazio.');
+      arr.unshift({id:uuid(),texto,usuario:who,data:nowBRFull()}); row[COL.comentarios]=jsonText(arr.slice(0,250));
+      addHistory(row,{tipo:'Comentário',texto,usuario:who}); row[COL.versao]=String(Number(row[COL.versao]||1)+1); row[COL.ultimoEditor]=who;
+    } else if (action==='meta.patch') {
+      const meta={...json(row[COL.meta],{}),...(input.patch||{})}; row[COL.meta]=jsonText(meta);
+      addHistory(row,{tipo:'Sistema',texto:'Metadados operacionais atualizados.',usuario:who}); row[COL.versao]=String(Number(row[COL.versao]||1)+1); row[COL.ultimoEditor]=who;
     } else throw new Error(`Ação inválida: ${action || '(vazia)'}`);
 
-    setMainRow(book, f.rowNumber, row);
-    await saveWorkbook(env, book);
-    return reply({ ok: true, row: f.rowNumber, versao: Number(row[COL.versao]), source: 'google-drive-xlsx-direct' });
+    setMainRow(book,f.rowNumber,row); await saveWorkbook(env,book); await clearListCache(env);
+    return reply({ ok:true,row:f.rowNumber,versao:Number(row[COL.versao]),source:'google-drive-xlsx-direct' });
   } catch (e) {
     console.error('DILIMAGALHAES API', e);
-    return reply({ error: e.message || 'Falha ao acessar o XLSX.' }, 502);
+    return reply({ error:e.message || 'Falha ao acessar o XLSX.' },502);
   }
 }
