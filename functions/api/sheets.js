@@ -104,7 +104,21 @@ function addHistory(row, entry = {}) {
   out.unshift({ id: uuid(), data: nowBRFull(), tipo: clean(entry.tipo) || 'Atualização', texto: clean(entry.texto), usuario: clean(entry.usuario) || 'Sistema' });
   row[COL.historico] = jsonText(out.slice(0, 250));
 }
+const DIFF_LABELS={0:'Responsável',1:'Processo',2:'Cliente',3:'Adverso',4:'Comarca',5:'Vara',6:'Seção',7:'Solicitação',8:'Data da solicitação',9:'Status',10:'Observação',12:'Prioridade',13:'Próxima ação',14:'Próxima verificação'};
+function diffSummary(before, after, data={}) {
+  const changes=[];
+  for (const [key,index] of Object.entries(COL)) {
+    if (index>=15 || index===11 || !Object.prototype.hasOwnProperty.call(data,key)) continue;
+    const a=clean(before[index]), b=clean(after[index]);
+    if (a===b) continue;
+    const label=DIFF_LABELS[index]||key;
+    const oldVal=a || '—', newVal=b || '—';
+    changes.push(`${label}: “${oldVal}” → “${newVal}”`);
+  }
+  return changes;
+}
 function makeRow(data = {}, existing = [], who = 'Sistema', mode = 'update') {
+  const before = fullRow(existing);
   const row = fullRow(existing);
   for (const [key, index] of Object.entries(COL)) {
     if (index >= 15 || key === 'atualizadoEm') continue;
@@ -114,7 +128,12 @@ function makeRow(data = {}, existing = [], who = 'Sistema', mode = 'update') {
   if (!clean(row[COL.prioridade])) row[COL.prioridade] = 'Normal';
   row[COL.versao] = String(Math.max(1, Number(row[COL.versao] || 0) + 1));
   row[COL.ultimoEditor] = who;
-  addHistory(row, { tipo: mode === 'create' ? 'Cadastro' : 'Atualização', texto: mode === 'create' ? 'Processo incluído pelo sistema.' : 'Dados da diligência atualizados.', usuario: who });
+  if (mode === 'create') {
+    addHistory(row, { tipo:'Cadastro', texto:'Processo incluído pelo sistema.', usuario:who });
+  } else {
+    const changes=diffSummary(before,row,data);
+    addHistory(row,{tipo:'Atualização',texto:changes.length?changes.join(' | '):'Dados da diligência atualizados.',usuario:who});
+  }
   return row;
 }
 function findRow(rows, input) {
