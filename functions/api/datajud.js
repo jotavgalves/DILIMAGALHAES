@@ -27,27 +27,50 @@ function endpointFor(parts) {
 function moveName(m={}) {
   return String(m.nome || m.movimento?.nome || m.descricao || m.codigo || 'Movimentação processual').trim();
 }
+function movementCategory(m={}) {
+  const t = `${moveName(m)} ${JSON.stringify(m.complementosTabelados || [])}`.toLowerCase();
+  if (/senten/.test(t)) return 'sentenca';
+  if (/acórd|acord/.test(t)) return 'acordao';
+  if (/decis|julgament|mérito|merito/.test(t)) return 'decisao';
+  if (/despacho/.test(t)) return 'despacho';
+  if (/intima/.test(t)) return 'intimacao';
+  if (/citaç|citacao|citação/.test(t)) return 'citacao';
+  if (/conclus/.test(t)) return 'conclusao';
+  if (/expedi|mandado|ofício|oficio|alvar/.test(t)) return 'expedicao';
+  if (/juntad|petiç|petic|manifest/.test(t)) return 'juntada';
+  if (/arquiv|baixa|trânsito|transito em julgado/.test(t)) return 'encerramento';
+  return 'movimentacao';
+}
 function normalizeMovement(m={}) {
-  return {
+  const normalized = {
     codigo: m.codigo ?? m.movimento?.codigo ?? '',
     nome: moveName(m),
     dataHora: m.dataHora || m.data || '',
     complementosTabelados: Array.isArray(m.complementosTabelados) ? m.complementosTabelados : [],
     orgaoJulgador: m.orgaoJulgador || null
   };
+  normalized.categoria = movementCategory(normalized);
+  normalized.chave = `${normalized.dataHora || ''}|${normalized.codigo || ''}|${normalized.nome || ''}`;
+  return normalized;
 }
 function operationalInsight(result) {
   const latest = result?.latestMovement;
-  if (!latest) return { level:'neutral', label:'Sem movimento recente identificado', suggestedStatus:'Monitoramento', suggestedAction:'Manter acompanhamento manual.' };
-  const t = `${latest.nome} ${JSON.stringify(latest.complementosTabelados || [])}`.toLowerCase();
-  if (/senten|acórd|acord|decis|julgament|mérito|merito/.test(t)) return { level:'high', label:'Decisão/julgamento detectado', suggestedStatus:'Aguardando orientação', suggestedAction:'Ler o teor da decisão e definir a providência jurídica.' };
-  if (/intima|citaç|citacao|citação/.test(t)) return { level:'high', label:'Intimação/citação detectada', suggestedStatus:'A diligenciar', suggestedAction:'Conferir o teor e verificar imediatamente eventual prazo.' };
-  if (/conclus/.test(t)) return { level:'medium', label:'Autos conclusos', suggestedStatus:'Concluso', suggestedAction:'Acompanhar gabinete e aguardar pronunciamento.' };
-  if (/despacho/.test(t)) return { level:'high', label:'Novo despacho', suggestedStatus:'A diligenciar', suggestedAction:'Ler o despacho e registrar a providência necessária.' };
-  if (/expedi|mandado|ofício|oficio|alvar/.test(t)) return { level:'medium', label:'Expedição/cumprimento', suggestedStatus:'Aguardando cumprimento', suggestedAction:'Verificar expedição e posterior cumprimento.' };
-  if (/juntad|petiç|petic|manifest/.test(t)) return { level:'medium', label:'Petição/documento juntado', suggestedStatus:'Monitoramento', suggestedAction:'Conferir a juntada e avaliar se exige manifestação.' };
-  if (/arquiv|baixa|trânsito|transito em julgado/.test(t)) return { level:'low', label:'Possível encerramento', suggestedStatus:'Finalizado', suggestedAction:'Confirmar baixa/arquivamento antes de finalizar internamente.' };
-  return { level:'neutral', label:'Movimentação nova', suggestedStatus:'Monitoramento', suggestedAction:'Analisar a última movimentação e registrar a próxima ação.' };
+  if (!latest) return { level:'neutral', category:'none', label:'Sem movimento recente identificado', suggestedStatus:'Monitoramento', suggestedAction:'Manter acompanhamento manual.' };
+  const category = latest.categoria || movementCategory(latest);
+  const map = {
+    sentenca: { level:'high', label:'Sentença detectada', suggestedStatus:'Aguardando orientação', suggestedAction:'Ler o teor da sentença e definir a providência jurídica.' },
+    acordao: { level:'high', label:'Acórdão detectado', suggestedStatus:'Aguardando orientação', suggestedAction:'Analisar o acórdão e verificar eventual providência ou prazo recursal.' },
+    decisao: { level:'high', label:'Decisão/julgamento detectado', suggestedStatus:'Aguardando orientação', suggestedAction:'Ler o teor da decisão e definir a providência jurídica.' },
+    intimacao: { level:'high', label:'Intimação detectada', suggestedStatus:'A diligenciar', suggestedAction:'Conferir o teor e verificar imediatamente eventual prazo.' },
+    citacao: { level:'high', label:'Citação detectada', suggestedStatus:'A diligenciar', suggestedAction:'Conferir a citação e verificar imediatamente a providência necessária.' },
+    conclusao: { level:'medium', label:'Autos conclusos', suggestedStatus:'Concluso', suggestedAction:'Acompanhar gabinete e aguardar pronunciamento.' },
+    despacho: { level:'high', label:'Novo despacho', suggestedStatus:'A diligenciar', suggestedAction:'Ler o despacho e registrar a providência necessária.' },
+    expedicao: { level:'medium', label:'Expedição/cumprimento', suggestedStatus:'Aguardando cumprimento', suggestedAction:'Verificar expedição e posterior cumprimento.' },
+    juntada: { level:'medium', label:'Petição/documento juntado', suggestedStatus:'Monitoramento', suggestedAction:'Conferir a juntada e avaliar se exige manifestação.' },
+    encerramento: { level:'low', label:'Possível encerramento', suggestedStatus:'Finalizado', suggestedAction:'Confirmar baixa/arquivamento antes de finalizar internamente.' },
+    movimentacao: { level:'neutral', label:'Movimentação nova', suggestedStatus:'Monitoramento', suggestedAction:'Analisar a última movimentação e registrar a próxima ação.' }
+  };
+  return { category, ...(map[category] || map.movimentacao) };
 }
 function normalizeHit(hit) {
   const s = hit?._source || {};
@@ -117,7 +140,30 @@ function knownDate(item) {
   if (typeof item === 'string') return '';
   return String(item?.knownLatest || item?.ultimaMovimentacao || '').trim();
 }
+function knownKey(item) {
+  if (typeof item === 'string') return '';
+  return String(item?.knownKey || item?.ultimaChave || '').trim();
+}
 function processValue(item) { return typeof item === 'string' ? item : item?.processo; }
+function detectChange(out, item) {
+  const latest = out?.result?.latestMovement || null;
+  const previousDate = knownDate(item);
+  const previousKey = knownKey(item);
+  const latestDate = String(latest?.dataHora || '');
+  const latestKey = String(latest?.chave || '');
+  const hasNewMovement = Boolean(latest && (previousKey ? latestKey !== previousKey : latestDate && (!previousDate || latestDate > previousDate)));
+  return {
+    hasNewMovement,
+    changeType: hasNewMovement ? (previousKey || previousDate ? 'nova_movimentacao' : 'primeira_leitura') : 'sem_alteracao',
+    previousLatest: previousDate,
+    previousKey,
+    latestKey,
+    latestCategory: latest?.categoria || null,
+    latestLabel: out?.result?.insight?.label || null,
+    suggestedStatus: out?.result?.insight?.suggestedStatus || null,
+    suggestedAction: out?.result?.insight?.suggestedAction || null
+  };
+}
 async function batch(items, env) {
   const unique=[]; const seen=new Set();
   for (const item of items.slice(0,40)) {
@@ -128,16 +174,20 @@ async function batch(items, env) {
   async function worker(){
     while (true) {
       const i=cursor++; if (i>=unique.length) break;
-      const item=unique[i], out=await queryOne(processValue(item), env), known=knownDate(item);
-      const latest=out?.result?.latestMovement?.dataHora || '';
-      results[i]={...out, knownLatest:known, hasNewMovement:Boolean(latest && (!known || latest>known))};
+      const item=unique[i], out=await queryOne(processValue(item), env);
+      results[i]={...out, ...detectChange(out,item)};
     }
   }
   await Promise.all(Array.from({length:Math.min(6,unique.length||1)},()=>worker()));
   const found=results.filter(x=>x?.found).length;
   const changed=results.filter(x=>x?.hasNewMovement).length;
   const failed=results.filter(x=>x && !x.ok).length;
-  return { ok:true, batch:true, count:results.length, found, changed, failed, results, checkedAt:new Date().toISOString() };
+  const urgent=results.filter(x=>x?.hasNewMovement && x?.result?.insight?.level==='high').length;
+  const categories={};
+  for (const x of results) if (x?.hasNewMovement) {
+    const k=x.latestCategory||'movimentacao'; categories[k]=(categories[k]||0)+1;
+  }
+  return { ok:true, batch:true, count:results.length, found, changed, urgent, failed, categories, results, checkedAt:new Date().toISOString() };
 }
 
 export async function onRequestPost({ request, env }) {
